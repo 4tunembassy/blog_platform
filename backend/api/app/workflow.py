@@ -1,50 +1,25 @@
 from __future__ import annotations
 
-class WorkflowError(ValueError):
-    pass
+from dataclasses import dataclass
+from sqlalchemy import text
+from sqlalchemy.engine import Engine
 
-STATES = {
-    "intake",
-    "classified",
-    "researched",
-    "drafted",
-    "review_needed",
-    "approved",
-    "published",
-    "archived",
-}
+@dataclass
+class WorkflowError(Exception):
+    message: str
+    def __str__(self) -> str:
+        return self.message
 
-# Allowed transitions depend on tier (1 or 2). Tier 3 is restricted in MVP.
-ALLOWED_TIER1 = {
-    "intake": {"classified"},
-    "classified": {"researched"},
-    "researched": {"drafted"},
-    "drafted": {"published"},
-    "published": {"archived"},
-}
+def list_allowed_states(engine: Engine) -> set[str]:
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text("SELECT unnest(enum_range(NULL::content_state))::text AS s")
+        ).scalars().all()
+    return set(rows)
 
-ALLOWED_TIER2 = {
-    "intake": {"classified"},
-    "classified": {"researched"},
-    "researched": {"drafted"},
-    "drafted": {"review_needed"},
-    "review_needed": {"approved", "drafted"},  # allow revise
-    "approved": {"published"},
-    "published": {"archived"},
-}
-
-def validate_transition(from_state: str, to_state: str, risk_tier: int) -> None:
-    if from_state not in STATES:
-        raise WorkflowError(f"Unknown from_state: {from_state}")
-    if to_state not in STATES:
-        raise WorkflowError(f"Unknown to_state: {to_state}")
-
-    if risk_tier == 1:
-        allowed = ALLOWED_TIER1
-    elif risk_tier == 2:
-        allowed = ALLOWED_TIER2
-    else:
-        raise WorkflowError("Tier 3 content is restricted in MVP.")
-
-    if to_state not in allowed.get(from_state, set()):
-        raise WorkflowError(f"Invalid transition {from_state} -> {to_state} for tier {risk_tier}")
+def validate_transition(engine: Engine, from_state: str, to_state: str, risk_tier: int) -> None:
+    allowed = list_allowed_states(engine)
+    if to_state not in allowed:
+        raise WorkflowError(f"Invalid to_state '{to_state}'. Allowed: {sorted(allowed)}")
+    if from_state == to_state:
+        raise WorkflowError("No-op transition (from_state == to_state) is not allowed")

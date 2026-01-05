@@ -4,17 +4,12 @@ import os
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-def _get_database_url() -> str:
-    url = os.getenv("DATABASE_URL", "").strip()
+def get_engine() -> Engine:
+    url = os.getenv("DATABASE_URL")
     if not url:
         raise RuntimeError("DATABASE_URL is not set")
-    return url
+    return create_engine(url, pool_pre_ping=True, future=True)
 
-def get_engine() -> Engine:
-    db_echo = os.getenv("DB_ECHO", "false").lower() in ("1", "true", "yes", "on")
-    return create_engine(_get_database_url(), echo=db_echo, pool_pre_ping=True)
-
-def db_ping(engine: Engine) -> bool:
-    with engine.connect() as conn:
+def db_ping(engine: Engine) -> None:
+    with engine.begin() as conn:
         conn.execute(text("SELECT 1"))
-    return True
