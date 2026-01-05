@@ -1,6 +1,12 @@
 from fastapi import FastAPI
+from dotenv import load_dotenv
 
-app = FastAPI(title="Governed Blog Platform API", version="0.1.0")
+# Load environment variables from .env for local dev
+load_dotenv()
+
+from app.db import get_engine, db_ping  # noqa: E402
+
+app = FastAPI(title="Blog Platform API", version="0.1.0")
 
 @app.get("/healthz")
 def healthz():
@@ -8,5 +14,6 @@ def healthz():
 
 @app.get("/readyz")
 def readyz():
-    # In MVP we simply return ok. Later: check DB connectivity, queue connectivity.
-    return {"ready": True}
+    engine = get_engine()
+    db_ping(engine)
+    return {"status": "ready", "db": "ok"}
