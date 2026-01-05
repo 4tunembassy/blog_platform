@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: blog
       POSTGRES_DB: blog_platform
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - ./.volumes/postgres:/var/lib/postgresql/data
 
