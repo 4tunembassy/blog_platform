@@ -17,7 +17,7 @@ from app.schemas import ContentCreateIn, ContentOut, TransitionIn, EventOut  # n
 from app import repo  # noqa: E402
 from app.workflow import validate_transition, WorkflowError  # noqa: E402
 
-app = FastAPI(title="Blog Platform API", version="0.2.3")
+app = FastAPI(title="Blog Platform API", version="0.2.6")
 TENANT_HEADER = "X-Tenant-Slug"
 
 @app.get("/debug/fingerprint")
@@ -90,18 +90,21 @@ def create_content(
 
         repo.append_event(
             engine,
-            entity_type="content",
-            entity_id=item["id"],
-            content_id=item["id"],
             tenant_id=tenant_id,
+            content_id=item["id"],
             event_type="content.created",
             actor_type="system",
             actor_id=None,
-            payload={
-                "title": body.title,
-                "risk_tier": body.risk_tier,
-                "state": item.get("state"),
-                "tenant_slug": x_tenant_slug,
+            status="ok",
+            details={
+                "entity_type": "content",
+                "entity_id": item["id"],
+                "payload": {
+                    "title": body.title,
+                    "risk_tier": body.risk_tier,
+                    "state": item.get("state"),
+                    "tenant_slug": x_tenant_slug,
+                },
             },
         )
         return item
@@ -139,7 +142,7 @@ def get_content_events(
         if not tenant_id:
             raise HTTPException(status_code=404, detail=f"Tenant not found: {x_tenant_slug}")
         _ = repo.get_content(engine, tenant_id=tenant_id, content_id=content_id)
-        return repo.list_events(engine, "content", content_id)
+        return repo.list_events(engine, tenant_id=tenant_id, content_id=content_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Not found")
     except HTTPException:
@@ -169,19 +172,22 @@ def transition(
 
         repo.append_event(
             engine,
-            entity_type="content",
-            entity_id=content_id,
-            content_id=content_id,
             tenant_id=tenant_id,
+            content_id=content_id,
             event_type="content.transition",
             actor_type=body.actor_type,
             actor_id=body.actor_id,
-            payload={
-                "from_state": from_state,
-                "to_state": body.to_state,
-                "reason": body.reason,
-                "risk_tier": risk_tier,
-                "tenant_slug": x_tenant_slug,
+            status="ok",
+            details={
+                "entity_type": "content",
+                "entity_id": content_id,
+                "payload": {
+                    "from_state": from_state,
+                    "to_state": body.to_state,
+                    "reason": body.reason,
+                    "risk_tier": risk_tier,
+                    "tenant_slug": x_tenant_slug,
+                },
             },
         )
         return updated

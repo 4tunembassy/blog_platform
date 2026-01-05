@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -12,9 +11,7 @@ class WorkflowError(Exception):
 
 def list_allowed_states(engine: Engine) -> set[str]:
     with engine.begin() as conn:
-        rows = conn.execute(
-            text("SELECT unnest(enum_range(NULL::content_state))::text AS s")
-        ).scalars().all()
+        rows = conn.execute(text("SELECT unnest(enum_range(NULL::content_state))::text")).scalars().all()
     return set(rows)
 
 def validate_transition(engine: Engine, from_state: str, to_state: str, risk_tier: int) -> None:
