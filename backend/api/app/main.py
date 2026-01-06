@@ -1,4 +1,3 @@
-@'
 from __future__ import annotations
 
 import os
@@ -21,7 +20,12 @@ from sqlalchemy import text  # noqa: E402
 from app.db import get_engine, db_ping  # noqa: E402
 from app.schemas import ContentCreateIn, ContentOut, TransitionIn, EventOut  # noqa: E402
 from app import repo  # noqa: E402
-from app.workflow import validate_transition, WorkflowError, allowed_transitions, list_states  # noqa: E402
+from app.workflow import (  # noqa: E402
+    validate_transition,
+    WorkflowError,
+    allowed_transitions,
+    list_states,
+)
 from app.tenant import require_tenant  # noqa: E402
 
 app = FastAPI(title="Blog Platform API", version="0.3.0")
@@ -218,4 +222,3 @@ def transition(content_id: str, body: TransitionIn):
         raise HTTPException(status_code=404, detail="Not found")
     except WorkflowError as e:
         raise HTTPException(status_code=400, detail=str(e))
-'@ | Set-Content -Encoding utf8 .\backend\api\app\main.py

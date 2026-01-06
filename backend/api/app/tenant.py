@@ -1,26 +1,42 @@
-@'
 from __future__ import annotations
 
 from fastapi import Header, HTTPException
 from sqlalchemy import text
 
+from app.db import get_engine
 
-def require_tenant(engine, x_tenant_slug: str | None = Header(default=None, alias="X-Tenant-Slug")) -> str:
+
+def require_tenant(engine=None, x_tenant_slug: str | None = Header(default=None)) -> str:
     """
-    Resolves tenant_id from X-Tenant-Slug header.
-    Returns tenant_id as UUID string.
+    Resolve tenant_id from header X-Tenant-Slug.
+
+    Returns:
+        tenant_id as UUID string
+
+    Raises:
+        HTTPException 400 if header missing
+        HTTPException 404 if tenant slug not found
     """
-    if not x_tenant_slug:
+    slug = (x_tenant_slug or "").strip()
+    if not slug:
         raise HTTPException(status_code=400, detail="Missing X-Tenant-Slug header")
 
+    if engine is None:
+        engine = get_engine()
+
     with engine.begin() as conn:
-        row = conn.execute(
-            text("SELECT id::text AS id FROM tenants WHERE slug = :slug"),
-            {"slug": x_tenant_slug},
-        ).mappings().first()
+        tenant_id = conn.execute(
+            text(
+                """
+                SELECT id::text
+                FROM tenants
+                WHERE slug = :slug
+                """
+            ),
+            {"slug": slug},
+        ).scalar_one_or_none()
 
-    if not row:
-        raise HTTPException(status_code=404, detail=f"Tenant not found: {x_tenant_slug}")
+    if not tenant_id:
+        raise HTTPException(status_code=404, detail=f"Tenant not found: {slug}")
 
-    return row["id"]
-'@ | Set-Content -Encoding utf8 .\backend\api\app\tenant.py
+    return str(tenant_id)
