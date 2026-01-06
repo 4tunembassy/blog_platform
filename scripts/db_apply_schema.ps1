@@ -2,28 +2,38 @@ param(
   [string]$DbName = "blog_platform",
   [string]$DbUser = "blog",
   [string]$DbPassword = "blog",
-  [string]$DockerPostgresContainer = ""
+  [string]$DockerPostgresContainer = $Env:BP_PG_CONTAINER
 )
 
 $ErrorActionPreference = "Stop"
 $env:PGPASSWORD = $DbPassword
 
-Write-Host "Applying schema to ${DbUser}@docker/${DbName} ..."
+$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+$schemaPath = Join-Path $RepoRoot "infra\db\schema.sql"
 
-$schemaPath = ".\infra\db\schema.sql"
-
-# Auto-detect postgres container if not provided
-if (-not $DockerPostgresContainer -or $DockerPostgresContainer.Trim() -eq "") {
-  $pg = docker ps --format "{{.Names}} {{.Image}}" | Select-String -Pattern "postgres" | Select-Object -First 1
-  if (-not $pg) {
-    throw "Could not find a running postgres container. Start docker compose first."
-  }
-  $DockerPostgresContainer = ($pg.Line.Split(" ")[0]).Trim()
+if (-not (Test-Path $schemaPath)) {
+  throw "Schema file not found: $schemaPath"
 }
 
-Write-Host "Using container: $DockerPostgresContainer"
+Write-Host "Applying schema to ${DbUser}@docker/${DbName} ..." -ForegroundColor Yellow
 
-# PowerShell-safe pipe of SQL into psql inside container
-Get-Content $schemaPath -Raw | docker exec -i $DockerPostgresContainer psql -U $DbUser -d $DbName
+if (-not $DockerPostgresContainer -or $DockerPostgresContainer.Trim() -eq "") {
+  $preferred = "governed_blog_platform-postgres-1"
+  $names = docker ps --format "{{.Names}}"
+  if ($names -contains $preferred) {
+    $DockerPostgresContainer = $preferred
+  } else {
+    $pg = docker ps --format "{{.Names}} {{.Image}}" | Select-String -Pattern "postgres|pgvector" | Select-Object -First 1
+    if (-not $pg) {
+      throw "Could not find a running postgres container. Start docker compose first."
+    }
+    $DockerPostgresContainer = ($pg.Line.Split(" ")[0]).Trim()
+  }
+}
 
-Write-Host "Schema applied successfully (docker psql)."
+Write-Host "Using container: $DockerPostgresContainer" -ForegroundColor Cyan
+Write-Host "Schema path: $schemaPath" -ForegroundColor DarkGray
+
+(Get-Content -Raw -Path $schemaPath) | docker exec -i $DockerPostgresContainer psql -U $DbUser -d $DbName -v ON_ERROR_STOP=1
+
+Write-Host "Schema applied successfully (docker psql)." -ForegroundColor Green

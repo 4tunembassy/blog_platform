@@ -2,21 +2,16 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "Starting full local development stack..." -ForegroundColor Green
 
-# Always resolve paths relative to this script, not the current shell directory
+# Resolve repo root regardless of where PowerShell is launched from
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 
-# Optional: set this if your container name differs
-# $Env:BP_PG_CONTAINER = "governed_blog_platform-postgres-1"
-
-# 1) Start Docker services + seed tenant (idempotent)
+# 1) Start Docker services + seed default tenant
 Write-Host "Bootstrapping Docker services + seeding default tenant..." -ForegroundColor Yellow
 $bootstrap = Join-Path $RepoRoot "scripts\bootstrap_db.ps1"
-if (-not (Test-Path $bootstrap)) {
-  throw "Missing script: $bootstrap"
-}
+if (-not (Test-Path $bootstrap)) { throw "Missing script: $bootstrap" }
 powershell -NoProfile -ExecutionPolicy Bypass -File $bootstrap
 
-# 2) Apply DB schema (if you still use this script)
+# 2) Apply DB schema (optional; keep if you maintain infra/db/schema.sql)
 $dbApply = Join-Path $RepoRoot "scripts\db_apply_schema.ps1"
 if (Test-Path $dbApply) {
   Write-Host "Applying DB schema..." -ForegroundColor Yellow
@@ -25,8 +20,7 @@ if (Test-Path $dbApply) {
   Write-Host "Skipping DB schema apply (scripts\db_apply_schema.ps1 not found)..." -ForegroundColor DarkGray
 }
 
-# 3) Start backend in a NEW PowerShell window
-# Your repo previously used run_api.ps1 (not run_backend.ps1). We'll support either.
+# 3) Start backend in a NEW PowerShell window (support run_api.ps1 OR run_backend.ps1)
 $runApi = Join-Path $RepoRoot "scripts\run_api.ps1"
 $runBackend = Join-Path $RepoRoot "scripts\run_backend.ps1"
 $backendScript = $null
@@ -44,9 +38,7 @@ Start-Process powershell -ArgumentList @(
 
 # 4) Start frontend in a NEW PowerShell window
 $runFrontend = Join-Path $RepoRoot "scripts\run_frontend.ps1"
-if (-not (Test-Path $runFrontend)) {
-  throw "Missing frontend runner: $runFrontend"
-}
+if (-not (Test-Path $runFrontend)) { throw "Missing frontend runner: $runFrontend" }
 
 Write-Host "Launching frontend window..." -ForegroundColor Yellow
 Start-Process powershell -ArgumentList @(
@@ -60,4 +52,5 @@ Write-Host ""
 Write-Host "Backend:  http://127.0.0.1:8000" -ForegroundColor Cyan
 Write-Host "Frontend: http://localhost:3000" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "Tip: Use .\scripts\stop.ps1 to stop both dev servers." -ForegroundColor DarkGray
+Write-Host "Smoke test: powershell -ExecutionPolicy Bypass -File .\scripts\smoke_test.ps1" -ForegroundColor DarkGray
+Write-Host "Stop:       .\scripts\stop.ps1 (or .\scripts\stop.ps1 -StopDocker)" -ForegroundColor DarkGray
