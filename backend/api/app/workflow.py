@@ -1,9 +1,9 @@
+@'
 from __future__ import annotations
 
-class WorkflowError(Exception):
-    pass
-
-STATES = [
+# These are your DB enum values (public.content_state).
+# Keep in sync with: SELECT unnest(enum_range(NULL::content_state))::text;
+STATES: list[str] = [
     "INGESTED",
     "CLASSIFIED",
     "SELECTED",
@@ -17,7 +17,17 @@ STATES = [
     "RETIRED",
 ]
 
-HAPPY_PATH = {
+
+class WorkflowError(Exception):
+    pass
+
+
+def list_states() -> list[str]:
+    return list(STATES)
+
+
+# Minimal policy for now (Tier1+ same for demo). We'll refine later.
+TRANSITIONS: dict[str, list[str]] = {
     "INGESTED": ["CLASSIFIED", "DEFERRED", "RETIRED"],
     "CLASSIFIED": ["SELECTED", "DEFERRED", "RETIRED"],
     "SELECTED": ["RESEARCHED", "DEFERRED", "RETIRED"],
@@ -31,21 +41,17 @@ HAPPY_PATH = {
     "RETIRED": [],
 }
 
-def validate_risk_tier(risk_tier: int) -> None:
-    if not isinstance(risk_tier, int):
-        raise WorkflowError("risk_tier must be an integer")
-    if risk_tier < 1 or risk_tier > 3:
-        raise WorkflowError("risk_tier must be between 1 and 3")
 
 def allowed_transitions(from_state: str, risk_tier: int) -> list[str]:
-    validate_risk_tier(risk_tier)
-    if from_state not in STATES:
-        return []
-    return HAPPY_PATH.get(from_state, [])
+    # risk_tier reserved for future gating
+    return TRANSITIONS.get(from_state, [])
+
 
 def validate_transition(from_state: str, to_state: str, risk_tier: int) -> None:
     if to_state not in STATES:
-        raise WorkflowError(f"Unknown to_state: {to_state}")
+        raise WorkflowError(f"Unknown state: {to_state}")
+
     allowed = allowed_transitions(from_state, risk_tier)
     if to_state not in allowed:
-        raise WorkflowError(f"Invalid transition {from_state} -> {to_state}")
+        raise WorkflowError(f"Invalid transition: {from_state} -> {to_state}. Allowed: {allowed}")
+'@ | Set-Content -Encoding utf8 .\backend\api\app\workflow.py
