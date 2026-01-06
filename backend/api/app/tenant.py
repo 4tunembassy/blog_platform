@@ -1,40 +1,30 @@
 from __future__ import annotations
 
+from fastapi import Header, HTTPException
 from sqlalchemy import text
-from sqlalchemy.engine import Engine
+
+from app.db import get_engine
 
 
-DEFAULT_TENANT_SLUG = "default"
-
-
-def require_tenant(engine: Engine, x_tenant_slug: str | None) -> str:
+def require_tenant(engine=None, x_tenant_slug: str | None = Header(default=None, alias="X-Tenant-Slug")) -> str:
     """
-    Resolve tenant_id from the request header "X-Tenant-Slug".
-
-    IMPORTANT:
-    - This function MUST receive a plain string (or None).
-    - Do NOT declare FastAPI Header() here because we call this directly from endpoints.
+    Resolves tenant_id (uuid string) from X-Tenant-Slug header.
+    Defaults to 'default' if header is missing/empty.
     """
-
-    slug = (x_tenant_slug or DEFAULT_TENANT_SLUG).strip()
+    slug = (x_tenant_slug or "default").strip()
     if not slug:
-        slug = DEFAULT_TENANT_SLUG
+        slug = "default"
 
-    sql = text(
-        """
-        SELECT id::text AS id
-        FROM tenants
-        WHERE slug = :slug
-        LIMIT 1
-        """
-    )
+    if engine is None:
+        engine = get_engine()
 
     with engine.begin() as conn:
-        row = conn.execute(sql, {"slug": slug}).mappings().first()
+        row = conn.execute(
+            text("SELECT id::text AS id FROM tenants WHERE slug = :slug"),
+            {"slug": slug},
+        ).mappings().first()
 
     if not row:
-        # If tenant doesn't exist, you can either throw or fallback.
-        # We'll throw clearly to avoid silent bugs.
-        raise KeyError(f"Tenant not found for slug '{slug}'")
+        raise HTTPException(status_code=404, detail=f"Unknown tenant slug: {slug}")
 
-    return str(row["id"])
+    return row["id"]
