@@ -2,28 +2,58 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "Starting full local development stack..." -ForegroundColor Green
 
-# 1) Start Docker services
-Write-Host "Starting Docker services..." -ForegroundColor Yellow
-docker compose -f .\infra\docker\docker-compose.local.yml up -d
+# Always resolve paths relative to this script, not the current shell directory
+$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 
-# 2) Apply DB schema (safe)
-Write-Host "Applying DB schema..." -ForegroundColor Yellow
-.\scripts\db_apply_schema.ps1
+# Optional: set this if your container name differs
+# $Env:BP_PG_CONTAINER = "governed_blog_platform-postgres-1"
+
+# 1) Start Docker services + seed tenant (idempotent)
+Write-Host "Bootstrapping Docker services + seeding default tenant..." -ForegroundColor Yellow
+$bootstrap = Join-Path $RepoRoot "scripts\bootstrap_db.ps1"
+if (-not (Test-Path $bootstrap)) {
+  throw "Missing script: $bootstrap"
+}
+powershell -NoProfile -ExecutionPolicy Bypass -File $bootstrap
+
+# 2) Apply DB schema (if you still use this script)
+$dbApply = Join-Path $RepoRoot "scripts\db_apply_schema.ps1"
+if (Test-Path $dbApply) {
+  Write-Host "Applying DB schema..." -ForegroundColor Yellow
+  powershell -NoProfile -ExecutionPolicy Bypass -File $dbApply
+} else {
+  Write-Host "Skipping DB schema apply (scripts\db_apply_schema.ps1 not found)..." -ForegroundColor DarkGray
+}
 
 # 3) Start backend in a NEW PowerShell window
+# Your repo previously used run_api.ps1 (not run_backend.ps1). We'll support either.
+$runApi = Join-Path $RepoRoot "scripts\run_api.ps1"
+$runBackend = Join-Path $RepoRoot "scripts\run_backend.ps1"
+$backendScript = $null
+if (Test-Path $runApi) { $backendScript = $runApi }
+elseif (Test-Path $runBackend) { $backendScript = $runBackend }
+else { throw "Missing backend runner. Expected scripts\run_api.ps1 or scripts\run_backend.ps1" }
+
 Write-Host "Launching backend window..." -ForegroundColor Yellow
 Start-Process powershell -ArgumentList @(
   "-NoExit",
+  "-NoProfile",
   "-ExecutionPolicy", "Bypass",
-  "-Command", "cd `"$PWD`"; .\scripts\run_backend.ps1"
+  "-Command", "cd `"$RepoRoot`"; & `"$backendScript`""
 )
 
 # 4) Start frontend in a NEW PowerShell window
+$runFrontend = Join-Path $RepoRoot "scripts\run_frontend.ps1"
+if (-not (Test-Path $runFrontend)) {
+  throw "Missing frontend runner: $runFrontend"
+}
+
 Write-Host "Launching frontend window..." -ForegroundColor Yellow
 Start-Process powershell -ArgumentList @(
   "-NoExit",
+  "-NoProfile",
   "-ExecutionPolicy", "Bypass",
-  "-Command", "cd `"$PWD`"; .\scripts\run_frontend.ps1"
+  "-Command", "cd `"$RepoRoot`"; & `"$runFrontend`""
 )
 
 Write-Host ""

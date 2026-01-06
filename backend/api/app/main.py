@@ -17,7 +17,7 @@ from app.schemas import ContentCreateIn, ContentOut, TransitionIn, EventOut  # n
 from app import repo  # noqa: E402
 from app.workflow import validate_transition, WorkflowError  # noqa: E402
 
-app = FastAPI(title="Blog Platform API", version="0.2.6")
+app = FastAPI(title="Blog Platform API", version="0.2.7")
 TENANT_HEADER = "X-Tenant-Slug"
 
 @app.get("/debug/fingerprint")
@@ -40,7 +40,7 @@ def debug_dbinfo():
     with engine.begin() as conn:
         row = conn.execute(
             text(
-                """
+                '''
                 SELECT
                   current_user AS user,
                   current_database() AS db,
@@ -48,18 +48,18 @@ def debug_dbinfo():
                   inet_server_addr() AS server_ip,
                   inet_server_port() AS server_port,
                   version() AS version
-                """
+                '''
             )
         ).mappings().first()
 
         tables = conn.execute(
             text(
-                """
+                '''
                 SELECT tablename
                 FROM pg_tables
                 WHERE schemaname = 'public'
                 ORDER BY tablename
-                """
+                '''
             )
         ).scalars().all()
 
