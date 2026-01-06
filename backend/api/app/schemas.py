@@ -1,5 +1,5 @@
 from __future__ import annotations
-from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 class ContentCreateIn(BaseModel):
@@ -11,8 +11,8 @@ class ContentOut(BaseModel):
     title: str
     state: str
     risk_tier: int
-    created_at: datetime
-    updated_at: datetime
+    created_at: str
+    updated_at: str
 
 class TransitionIn(BaseModel):
     to_state: str = Field(min_length=2, max_length=50)
@@ -28,4 +28,10 @@ class EventOut(BaseModel):
     actor_type: str
     actor_id: str | None
     payload: dict
-    created_at: datetime
+    created_at: str
+
+class AllowedTransitionsOut(BaseModel):
+    content_id: str
+    from_state: str
+    risk_tier: int
+    allowed: list[str]
