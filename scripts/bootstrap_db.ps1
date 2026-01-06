@@ -1,7 +1,8 @@
 Param(
   [string]$ComposeFile = ".\infra\docker\docker-compose.local.yml",
   [string]$PgContainer = $Env:BP_PG_CONTAINER,
-  [int]$WaitSeconds = 60
+  [int]$WaitSeconds = 60,
+  [switch]$SkipMigrations
 )
 
 $ErrorActionPreference = "Stop"
@@ -39,5 +40,16 @@ if ((Get-Date) -ge $deadline) {
   exit 1
 }
 
-# Seed
+# Seed tenant (idempotent)
 powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "seed.ps1") -ComposeFile $ComposeFile -PgContainer $PgContainer
+
+if (-not $SkipMigrations) {
+  $migrate = Join-Path $PSScriptRoot "migrate.ps1"
+  if (Test-Path $migrate) {
+    powershell -ExecutionPolicy Bypass -File $migrate
+  } else {
+    Write-Host "Skipping migrations: scripts/migrate.ps1 not found." -ForegroundColor DarkGray
+  }
+} else {
+  Write-Host "Skipping migrations (-SkipMigrations specified)." -ForegroundColor DarkGray
+}
