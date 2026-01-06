@@ -6,33 +6,25 @@ from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
-# -------------------------------------------------------------------
-# ENV LOADING (MUST RUN BEFORE importing app.db / anything that reads env)
-# Always load backend/api/.env no matter where uvicorn is launched from.
-# backend/api/app/main.py -> parents[1] == backend/api
-# -------------------------------------------------------------------
+# Load backend/api/.env regardless of where uvicorn starts
 ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 load_dotenv(dotenv_path=ENV_PATH, override=False)
 
-from fastapi import FastAPI, HTTPException  # noqa: E402
+from fastapi import FastAPI, HTTPException, Header  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 from app.db import get_engine, db_ping  # noqa: E402
 from app.schemas import ContentCreateIn, ContentOut, TransitionIn, EventOut  # noqa: E402
 from app import repo  # noqa: E402
-from app.workflow import (  # noqa: E402
-    validate_transition,
-    WorkflowError,
-    allowed_transitions,
-    list_states,
-)
+from app.workflow import validate_transition, WorkflowError, allowed_transitions, list_states  # noqa: E402
 from app.tenant import require_tenant  # noqa: E402
+
 
 app = FastAPI(title="Blog Platform API", version="0.3.0")
 
 
 # -----------------------------
-# Debug endpoints (TEMPORARY)
+# Debug endpoints (TEMP)
 # -----------------------------
 @app.get("/debug/fingerprint")
 def debug_fingerprint():
@@ -106,11 +98,13 @@ def workflow_states():
 
 
 @app.get("/content/{content_id}/allowed")
-def content_allowed(content_id: str):
+def content_allowed(
+    content_id: str,
+    x_tenant_slug: str | None = Header(default=None, alias="X-Tenant-Slug"),
+):
     engine = get_engine()
-    tenant_id = require_tenant(engine)
-
     try:
+        tenant_id = require_tenant(engine, x_tenant_slug)
         current = repo.get_content(engine, tenant_id, content_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Not found")
@@ -127,14 +121,18 @@ def content_allowed(content_id: str):
 
 
 # -----------------------------
-# Content workflow endpoints
+# Content endpoints
 # -----------------------------
 @app.post("/content", response_model=ContentOut)
-def create_content(body: ContentCreateIn):
+def create_content(
+    body: ContentCreateIn,
+    x_tenant_slug: str | None = Header(default=None, alias="X-Tenant-Slug"),
+):
     engine = get_engine()
-    tenant_id = require_tenant(engine)
 
     try:
+        tenant_id = require_tenant(engine, x_tenant_slug)
+
         item = repo.create_content(
             engine,
             tenant_id=tenant_id,
@@ -142,6 +140,7 @@ def create_content(body: ContentCreateIn):
             risk_tier=body.risk_tier,
         )
 
+        # This requires public.events table (see SQL below)
         repo.append_event(
             engine,
             tenant_id=tenant_id,
@@ -154,32 +153,40 @@ def create_content(body: ContentCreateIn):
                 "title": body.title,
                 "risk_tier": body.risk_tier,
                 "state": item.get("state"),
-                "tenant_slug": "default",
+                "tenant_slug": (x_tenant_slug or "default"),
             },
         )
+
         return item
 
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
+        # Return real error text (so you stop seeing just "Internal Server Error")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/content/{content_id}", response_model=ContentOut)
-def get_content(content_id: str):
+def get_content(
+    content_id: str,
+    x_tenant_slug: str | None = Header(default=None, alias="X-Tenant-Slug"),
+):
     engine = get_engine()
-    tenant_id = require_tenant(engine)
-
     try:
+        tenant_id = require_tenant(engine, x_tenant_slug)
         return repo.get_content(engine, tenant_id, content_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Not found")
 
 
 @app.get("/content/{content_id}/events", response_model=list[EventOut])
-def get_content_events(content_id: str):
+def get_content_events(
+    content_id: str,
+    x_tenant_slug: str | None = Header(default=None, alias="X-Tenant-Slug"),
+):
     engine = get_engine()
-    tenant_id = require_tenant(engine)
-
     try:
+        tenant_id = require_tenant(engine, x_tenant_slug)
         _ = repo.get_content(engine, tenant_id, content_id)
         return repo.list_events(engine, tenant_id, "content", content_id)
     except KeyError:
@@ -187,11 +194,16 @@ def get_content_events(content_id: str):
 
 
 @app.post("/content/{content_id}/transition", response_model=ContentOut)
-def transition(content_id: str, body: TransitionIn):
+def transition(
+    content_id: str,
+    body: TransitionIn,
+    x_tenant_slug: str | None = Header(default=None, alias="X-Tenant-Slug"),
+):
     engine = get_engine()
-    tenant_id = require_tenant(engine)
 
     try:
+        tenant_id = require_tenant(engine, x_tenant_slug)
+
         current = repo.get_content(engine, tenant_id, content_id)
         from_state = current["state"]
         risk_tier = int(current["risk_tier"])
@@ -213,12 +225,15 @@ def transition(content_id: str, body: TransitionIn):
                 "to_state": body.to_state,
                 "reason": body.reason,
                 "risk_tier": risk_tier,
-                "tenant_slug": "default",
+                "tenant_slug": (x_tenant_slug or "default"),
             },
         )
+
         return updated
 
     except KeyError:
         raise HTTPException(status_code=404, detail="Not found")
     except WorkflowError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

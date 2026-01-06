@@ -1,42 +1,40 @@
 from __future__ import annotations
 
-from fastapi import Header, HTTPException
 from sqlalchemy import text
+from sqlalchemy.engine import Engine
 
-from app.db import get_engine
+
+DEFAULT_TENANT_SLUG = "default"
 
 
-def require_tenant(engine=None, x_tenant_slug: str | None = Header(default=None)) -> str:
+def require_tenant(engine: Engine, x_tenant_slug: str | None) -> str:
     """
-    Resolve tenant_id from header X-Tenant-Slug.
+    Resolve tenant_id from the request header "X-Tenant-Slug".
 
-    Returns:
-        tenant_id as UUID string
-
-    Raises:
-        HTTPException 400 if header missing
-        HTTPException 404 if tenant slug not found
+    IMPORTANT:
+    - This function MUST receive a plain string (or None).
+    - Do NOT declare FastAPI Header() here because we call this directly from endpoints.
     """
-    slug = (x_tenant_slug or "").strip()
+
+    slug = (x_tenant_slug or DEFAULT_TENANT_SLUG).strip()
     if not slug:
-        raise HTTPException(status_code=400, detail="Missing X-Tenant-Slug header")
+        slug = DEFAULT_TENANT_SLUG
 
-    if engine is None:
-        engine = get_engine()
+    sql = text(
+        """
+        SELECT id::text AS id
+        FROM tenants
+        WHERE slug = :slug
+        LIMIT 1
+        """
+    )
 
     with engine.begin() as conn:
-        tenant_id = conn.execute(
-            text(
-                """
-                SELECT id::text
-                FROM tenants
-                WHERE slug = :slug
-                """
-            ),
-            {"slug": slug},
-        ).scalar_one_or_none()
+        row = conn.execute(sql, {"slug": slug}).mappings().first()
 
-    if not tenant_id:
-        raise HTTPException(status_code=404, detail=f"Tenant not found: {slug}")
+    if not row:
+        # If tenant doesn't exist, you can either throw or fallback.
+        # We'll throw clearly to avoid silent bugs.
+        raise KeyError(f"Tenant not found for slug '{slug}'")
 
-    return str(tenant_id)
+    return str(row["id"])
