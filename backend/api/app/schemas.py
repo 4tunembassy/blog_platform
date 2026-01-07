@@ -1,26 +1,24 @@
-from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional
+from __future__ import annotations
 
-from pydantic import BaseModel, Field, ConfigDict
+from typing import List, Literal, Optional
+
+from pydantic import BaseModel, Field
 
 
-ContentState = Literal["INGESTED", "CLASSIFIED", "DEFERRED", "RETIRED"]
-
+# --------- Core DTOs ---------
 
 class ContentCreateIn(BaseModel):
-    title: str = Field(..., min_length=1, max_length=400)
-    risk_tier: int = Field(1, ge=1, le=3, description="Risk tier 1..3 (DB enum supports TIER_1..TIER_3)")
+    title: str = Field(..., min_length=1, max_length=500)
+    risk_tier: int = Field(1, ge=1, le=4)
 
 
 class ContentOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
     id: str
     title: str
-    state: ContentState
+    state: str
     risk_tier: int
-    created_at: datetime
-    updated_at: datetime
+    created_at: str
+    updated_at: str
 
 
 class ContentListOut(BaseModel):
@@ -32,9 +30,20 @@ class ContentListOut(BaseModel):
 
 class AllowedTransitionsOut(BaseModel):
     content_id: str
-    from_state: ContentState
+    from_state: str
     risk_tier: int
-    allowed: List[ContentState]
+    allowed: List[str]
+
+
+class TransitionIn(BaseModel):
+    to_state: str = Field(..., min_length=1, max_length=50)
+
+
+class TransitionOut(BaseModel):
+    content_id: str
+    from_state: str
+    to_state: str
+    risk_tier: int
 
 
 class EventOut(BaseModel):
@@ -44,16 +53,10 @@ class EventOut(BaseModel):
     event_type: str
     actor_type: str
     actor_id: Optional[str] = None
-    payload: Dict[str, Any]
-    created_at: datetime
+    payload: dict
+    created_at: str
 
 
-class TransitionIn(BaseModel):
-    to_state: ContentState
+# --------- Query types ---------
 
-
-class TransitionOut(BaseModel):
-    content_id: str
-    from_state: ContentState
-    to_state: ContentState
-    risk_tier: int
+SortKey = Literal["created_at_desc", "created_at_asc"]

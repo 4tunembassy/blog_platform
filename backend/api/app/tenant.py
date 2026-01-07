@@ -1,26 +1,30 @@
-from fastapi import Header, HTTPException
+from __future__ import annotations
+
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 
-def require_tenant(x_tenant_slug: str | None = Header(default=None, alias="X-Tenant-Slug")) -> str:
-    if not x_tenant_slug or not x_tenant_slug.strip():
-        raise HTTPException(status_code=400, detail="X-Tenant-Slug header is required")
-    return x_tenant_slug.strip()
-
-
 def resolve_tenant_id(engine: Engine, tenant_slug: str) -> str:
-    sql = text("""
+    """
+    Returns tenant_id as text UUID for a given slug, raises ValueError if not found.
+    """
+    slug = (tenant_slug or "").strip()
+    if not slug:
+        raise ValueError("X-Tenant-Slug header is required")
+
+    sql = text(
+        """
         SELECT id::text AS id
         FROM public.tenants
         WHERE slug = :slug
         LIMIT 1
-    """)
+        """
+    )
 
     with engine.begin() as conn:
-        row = conn.execute(sql, {"slug": tenant_slug}).mappings().first()
+        row = conn.execute(sql, {"slug": slug}).mappings().one_or_none()
 
     if not row:
-        raise HTTPException(status_code=404, detail=f"Tenant not found: {tenant_slug}")
+        raise ValueError(f"Unknown tenant slug: {slug}")
 
     return row["id"]

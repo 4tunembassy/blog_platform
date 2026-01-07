@@ -1,218 +1,338 @@
-import json
-from uuid import UUID
+from __future__ import annotations
+
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 
-# ---------- helpers ----------
+# -----------------------------
+# Helpers
+# -----------------------------
 
-def _risk_enum_from_tier(risk_tier: int) -> str:
-    """
-    DB enum risk_tier supports: TIER_1, TIER_2, TIER_3
-    Clamp and keep safe.
-    """
-    if risk_tier <= 1:
-        return "TIER_1"
-    if risk_tier == 2:
-        return "TIER_2"
-    return "TIER_3"
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-def _risk_tier_from_enum(risk_enum: str) -> int:
-    return {"TIER_1": 1, "TIER_2": 2, "TIER_3": 3}.get(risk_enum, 1)
+def _iso(dt: Any) -> str:
+    # dt may be datetime (psycopg) or already string
+    if dt is None:
+        return ""
+    if isinstance(dt, datetime):
+        return dt.isoformat().replace("+00:00", "Z")
+    return str(dt)
 
 
-# ---------- content ----------
+def _risk_enum(risk_tier: int) -> str:
+    # DB enum values are expected like: TIER_1, TIER_2, ...
+    rt = int(risk_tier)
+    if rt < 1 or rt > 4:
+        rt = 1
+    return f"TIER_{rt}"
+
+
+# -----------------------------
+# Content
+# -----------------------------
 
 def create_content_item(engine: Engine, tenant_id: str, title: str, risk_tier: int) -> Dict[str, Any]:
-    risk_enum = _risk_enum_from_tier(risk_tier)
+    now = _utc_now()
+    risk = _risk_enum(risk_tier)
 
-    sql = text("""
+    sql = text(
+        """
         INSERT INTO public.content_items (tenant_id, title, risk, state, created_at, updated_at)
-        VALUES (
-            CAST(:tenant_id AS uuid),
-            :title,
-            CAST(:risk AS risk_tier),
-            CAST('INGESTED' AS content_state),
-            now(),
-            now()
-        )
+        VALUES (CAST(:tenant_id AS uuid), :title, CAST(:risk AS risk_tier), 'INGESTED', :now, :now)
         RETURNING
             id::text AS id,
             title,
             state::text AS state,
-            risk::text AS risk_enum,
+            (CASE
+                WHEN risk='TIER_1' THEN 1
+                WHEN risk='TIER_2' THEN 2
+                WHEN risk='TIER_3' THEN 3
+                WHEN risk='TIER_4' THEN 4
+                ELSE 1
+             END) AS risk_tier,
             created_at,
             updated_at
-    """)
+        """
+    )
 
     with engine.begin() as conn:
-        row = conn.execute(sql, {"tenant_id": tenant_id, "title": title, "risk": risk_enum}).mappings().one()
-        out = dict(row)
-        out["risk_tier"] = _risk_tier_from_enum(out.pop("risk_enum"))
-        return out
+        row = conn.execute(
+            sql,
+            {"tenant_id": tenant_id, "title": title, "risk": risk, "now": now},
+        ).mappings().one()
+
+    return {
+        "id": row["id"],
+        "title": row["title"],
+        "state": row["state"],
+        "risk_tier": int(row["risk_tier"]),
+        "created_at": _iso(row["created_at"]),
+        "updated_at": _iso(row["updated_at"]),
+    }
 
 
-def get_content_by_id(conn, tenant_id: str, content_id: UUID) -> Optional[Dict[str, Any]]:
-    sql = text("""
+def get_content_by_id(engine: Engine, tenant_id: str, content_id: str) -> Optional[Dict[str, Any]]:
+    sql = text(
+        """
         SELECT
             id::text AS id,
             title,
             state::text AS state,
-            risk::text AS risk_enum,
+            (CASE
+                WHEN risk='TIER_1' THEN 1
+                WHEN risk='TIER_2' THEN 2
+                WHEN risk='TIER_3' THEN 3
+                WHEN risk='TIER_4' THEN 4
+                ELSE 1
+             END) AS risk_tier,
             created_at,
             updated_at
         FROM public.content_items
         WHERE tenant_id = CAST(:tenant_id AS uuid)
           AND id = CAST(:content_id AS uuid)
         LIMIT 1
-    """)
-    row = conn.execute(sql, {"tenant_id": tenant_id, "content_id": str(content_id)}).mappings().first()
+        """
+    )
+
+    with engine.begin() as conn:
+        row = conn.execute(
+            sql, {"tenant_id": tenant_id, "content_id": content_id}
+        ).mappings().one_or_none()
+
     if not row:
         return None
-    out = dict(row)
-    out["risk_tier"] = _risk_tier_from_enum(out.pop("risk_enum"))
-    return out
 
-
-def get_content(engine: Engine, tenant_id: str, content_id: UUID) -> Optional[Dict[str, Any]]:
-    with engine.begin() as conn:
-        return get_content_by_id(conn, tenant_id, content_id)
+    return {
+        "id": row["id"],
+        "title": row["title"],
+        "state": row["state"],
+        "risk_tier": int(row["risk_tier"]),
+        "created_at": _iso(row["created_at"]),
+        "updated_at": _iso(row["updated_at"]),
+    }
 
 
 def list_content(
     engine: Engine,
     tenant_id: str,
-    limit: int = 20,
-    offset: int = 0,
-    state: Optional[str] = None,
-    risk_tier: Optional[int] = None,
+    limit: int,
+    offset: int,
+    sort: str,
     q: Optional[str] = None,
-    sort: str = "created_at_desc",
 ) -> Tuple[List[Dict[str, Any]], int]:
     """
-    List content items with filters + pagination.
-    - state: INGESTED/CLASSIFIED/DEFERRED/RETIRED
-    - risk_tier: 1..3
-    - q: title search (ILIKE)
-    - sort: created_at_desc | created_at_asc | updated_at_desc | updated_at_asc
+    Returns (items, total)
     """
-    limit = max(1, min(int(limit), 100))
-    offset = max(0, int(offset))
+    sort = (sort or "created_at_desc").strip()
+    order_by = "created_at DESC" if sort == "created_at_desc" else "created_at ASC"
 
-    where = ["tenant_id = CAST(:tenant_id AS uuid)"]
+    base_where = "tenant_id = CAST(:tenant_id AS uuid)"
     params: Dict[str, Any] = {"tenant_id": tenant_id, "limit": limit, "offset": offset}
 
-    if state:
-        where.append("state = CAST(:state AS content_state)")
-        params["state"] = state
-
-    if risk_tier is not None:
-        params["risk_enum"] = _risk_enum_from_tier(int(risk_tier))
-        where.append("risk = CAST(:risk_enum AS risk_tier)")
-
     if q and q.strip():
-        where.append("title ILIKE :q")
+        base_where += " AND title ILIKE :q"
         params["q"] = f"%{q.strip()}%"
 
-    order_by = {
-        "created_at_desc": "created_at DESC",
-        "created_at_asc": "created_at ASC",
-        "updated_at_desc": "updated_at DESC",
-        "updated_at_asc": "updated_at ASC",
-    }.get(sort, "created_at DESC")
-
-    where_sql = " AND ".join(where)
-
-    count_sql = text(f"""
-        SELECT COUNT(*)::int AS total
-        FROM public.content_items
-        WHERE {where_sql}
-    """)
-
-    list_sql = text(f"""
+    sql_items = text(
+        f"""
         SELECT
             id::text AS id,
             title,
             state::text AS state,
-            risk::text AS risk_enum,
+            (CASE
+                WHEN risk='TIER_1' THEN 1
+                WHEN risk='TIER_2' THEN 2
+                WHEN risk='TIER_3' THEN 3
+                WHEN risk='TIER_4' THEN 4
+                ELSE 1
+             END) AS risk_tier,
             created_at,
             updated_at
         FROM public.content_items
-        WHERE {where_sql}
+        WHERE {base_where}
         ORDER BY {order_by}
-        LIMIT :limit
-        OFFSET :offset
-    """)
+        LIMIT :limit OFFSET :offset
+        """
+    )
+
+    sql_total = text(
+        f"""
+        SELECT COUNT(*)::int AS total
+        FROM public.content_items
+        WHERE {base_where}
+        """
+    )
 
     with engine.begin() as conn:
-        total = conn.execute(count_sql, params).scalar_one()
-        rows = conn.execute(list_sql, params).mappings().all()
+        total_row = conn.execute(sql_total, params).mappings().one()
+        rows = conn.execute(sql_items, params).mappings().all()
 
-    items: List[Dict[str, Any]] = []
-    for r in rows:
-        d = dict(r)
-        d["risk_tier"] = _risk_tier_from_enum(d.pop("risk_enum"))
-        items.append(d)
+    items = [
+        {
+            "id": r["id"],
+            "title": r["title"],
+            "state": r["state"],
+            "risk_tier": int(r["risk_tier"]),
+            "created_at": _iso(r["created_at"]),
+            "updated_at": _iso(r["updated_at"]),
+        }
+        for r in rows
+    ]
+    return items, int(total_row["total"])
 
-    return items, int(total)
+
+# -----------------------------
+# Allowed transitions
+# (placeholder logic — currently hardcoded by state + tier)
+# -----------------------------
+
+def get_allowed_transitions(engine: Engine, tenant_id: str, content_id: str) -> Dict[str, Any]:
+    """
+    Minimal governance rules for now:
+      - INGESTED -> CLASSIFIED, DEFERRED, RETIRED
+      - CLASSIFIED -> RETIRED
+      - DEFERRED -> INGESTED, RETIRED
+      - RETIRED -> (none)
+    Risk tier is returned for context.
+    """
+    item = get_content_by_id(engine, tenant_id, content_id)
+    if not item:
+        raise ValueError("Content not found")
+
+    state = item["state"]
+    risk_tier = int(item["risk_tier"])
+
+    if state == "INGESTED":
+        allowed = ["CLASSIFIED", "DEFERRED", "RETIRED"]
+    elif state == "CLASSIFIED":
+        allowed = ["RETIRED"]
+    elif state == "DEFERRED":
+        allowed = ["INGESTED", "RETIRED"]
+    else:
+        allowed = []
+
+    return {
+        "content_id": content_id,
+        "from_state": state,
+        "risk_tier": risk_tier,
+        "allowed": allowed,
+    }
 
 
-def update_content_state(conn, tenant_id: str, content_id: UUID, to_state: str) -> Dict[str, Any]:
-    sql = text("""
+def transition_content(engine: Engine, tenant_id: str, content_id: str, to_state: str) -> Dict[str, Any]:
+    allowed_info = get_allowed_transitions(engine, tenant_id, content_id)
+    from_state = allowed_info["from_state"]
+    risk_tier = allowed_info["risk_tier"]
+
+    to_state_norm = (to_state or "").strip().upper()
+    if to_state_norm not in allowed_info["allowed"]:
+        raise ValueError(f"Transition not allowed: {from_state} -> {to_state_norm}")
+
+    now = _utc_now()
+
+    sql = text(
+        """
         UPDATE public.content_items
         SET state = CAST(:to_state AS content_state),
-            updated_at = now()
+            updated_at = :now
         WHERE tenant_id = CAST(:tenant_id AS uuid)
           AND id = CAST(:content_id AS uuid)
+        RETURNING id::text AS id
+        """
+    )
+
+    with engine.begin() as conn:
+        row = conn.execute(
+            sql,
+            {
+                "tenant_id": tenant_id,
+                "content_id": content_id,
+                "to_state": to_state_norm,
+                "now": now,
+            },
+        ).mappings().one_or_none()
+
+    if not row:
+        raise ValueError("Content not found")
+
+    return {
+        "content_id": content_id,
+        "from_state": from_state,
+        "to_state": to_state_norm,
+        "risk_tier": risk_tier,
+    }
+
+
+# -----------------------------
+# Events
+# -----------------------------
+
+def insert_event(
+    engine: Engine,
+    tenant_id: str,
+    entity_type: str,
+    entity_id: str,
+    event_type: str,
+    payload: Dict[str, Any],
+    actor_type: str = "system",
+    actor_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    now = _utc_now()
+
+    sql = text(
+        """
+        INSERT INTO public.events
+            (tenant_id, entity_type, entity_id, event_type, actor_type, actor_id, payload, created_at)
+        VALUES
+            (CAST(:tenant_id AS uuid), :entity_type, CAST(:entity_id AS uuid), :event_type,
+             :actor_type, :actor_id, CAST(:payload AS jsonb), :now)
         RETURNING
             id::text AS id,
-            title,
-            state::text AS state,
-            risk::text AS risk_enum,
-            created_at,
-            updated_at
-    """)
-    row = conn.execute(
-        sql,
-        {"tenant_id": tenant_id, "content_id": str(content_id), "to_state": to_state},
-    ).mappings().one()
+            entity_type,
+            entity_id::text AS entity_id,
+            event_type,
+            actor_type,
+            actor_id,
+            payload,
+            created_at
+        """
+    )
 
-    out = dict(row)
-    out["risk_tier"] = _risk_tier_from_enum(out.pop("risk_enum"))
-    return out
+    with engine.begin() as conn:
+        row = conn.execute(
+            sql,
+            {
+                "tenant_id": tenant_id,
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "event_type": event_type,
+                "actor_type": actor_type,
+                "actor_id": actor_id,
+                "payload": payload and __import__("json").dumps(payload) or "{}",
+                "now": now,
+            },
+        ).mappings().one()
 
-
-# ---------- events ----------
-
-def insert_event(conn, tenant_id: str, entity_type: str, entity_id: str, event_type: str, payload: Dict[str, Any]) -> None:
-    sql = text("""
-        INSERT INTO public.events (
-            tenant_id, entity_type, entity_id, event_type, actor_type, actor_id, payload
-        )
-        VALUES (
-            CAST(:tenant_id AS uuid),
-            :entity_type,
-            CAST(:entity_id AS uuid),
-            :event_type,
-            'system',
-            NULL,
-            CAST(:payload AS jsonb)
-        )
-    """)
-    conn.execute(sql, {
-        "tenant_id": tenant_id,
-        "entity_type": entity_type,
-        "entity_id": entity_id,
-        "event_type": event_type,
-        "payload": json.dumps(payload),
-    })
+    return {
+        "id": row["id"],
+        "entity_type": row["entity_type"],
+        "entity_id": row["entity_id"],
+        "event_type": row["event_type"],
+        "actor_type": row["actor_type"],
+        "actor_id": row["actor_id"],
+        "payload": row["payload"],
+        "created_at": _iso(row["created_at"]),
+    }
 
 
-def list_events(engine: Engine, tenant_id: str, entity_type: str, entity_id: UUID) -> List[Dict[str, Any]]:
-    sql = text("""
+def list_events(engine: Engine, tenant_id: str, entity_type: str, entity_id: str) -> List[Dict[str, Any]]:
+    sql = text(
+        """
         SELECT
             id::text AS id,
             entity_type,
@@ -227,38 +347,25 @@ def list_events(engine: Engine, tenant_id: str, entity_type: str, entity_id: UUI
           AND entity_type = :entity_type
           AND entity_id = CAST(:entity_id AS uuid)
         ORDER BY created_at ASC
-    """)
+        """
+    )
+
     with engine.begin() as conn:
-        rows = conn.execute(sql, {"tenant_id": tenant_id, "entity_type": entity_type, "entity_id": str(entity_id)}).mappings().all()
-    return [dict(r) for r in rows]
+        rows = conn.execute(
+            sql,
+            {"tenant_id": tenant_id, "entity_type": entity_type, "entity_id": entity_id},
+        ).mappings().all()
 
-
-# ---------- workflow policy ----------
-
-def compute_allowed(from_state: str, risk_tier: int) -> List[str]:
-    # Policy v0 (simple + deterministic):
-    if from_state == "INGESTED":
-        return ["CLASSIFIED", "DEFERRED", "RETIRED"]
-    if from_state == "DEFERRED":
-        return ["CLASSIFIED", "RETIRED"]
-    if from_state == "CLASSIFIED":
-        return ["RETIRED"]
-    return []
-
-
-def get_allowed_transitions(engine: Engine, tenant_id: str, content_id: UUID) -> Optional[Dict[str, Any]]:
-    with engine.begin() as conn:
-        item = get_content_by_id(conn, tenant_id, content_id)
-        if not item:
-            return None
-
-        from_state = item["state"]
-        risk_tier = int(item["risk_tier"])
-        allowed = compute_allowed(from_state, risk_tier)
-
-        return {
-            "content_id": str(content_id),
-            "from_state": from_state,
-            "risk_tier": risk_tier,
-            "allowed": allowed,
+    return [
+        {
+            "id": r["id"],
+            "entity_type": r["entity_type"],
+            "entity_id": r["entity_id"],
+            "event_type": r["event_type"],
+            "actor_type": r["actor_type"],
+            "actor_id": r["actor_id"],
+            "payload": r["payload"],
+            "created_at": _iso(r["created_at"]),
         }
+        for r in rows
+    ]
