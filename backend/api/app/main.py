@@ -1,141 +1,207 @@
-# backend/api/app/main.py
-from __future__ import annotations
-
 import os
 from datetime import datetime, timezone
-from typing import List, Optional
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, HTTPException
-from sqlalchemy.engine import Engine
+from fastapi import FastAPI, Depends, HTTPException, Query
 
 from app.db import get_engine
+from app.tenant import require_tenant, resolve_tenant_id
+from app.schemas import (
+    ContentCreateIn,
+    ContentOut,
+    ContentListOut,
+    AllowedTransitionsOut,
+    EventOut,
+    TransitionIn,
+    TransitionOut,
+)
 from app.repo import (
     create_content_item,
+    insert_event,
+    list_events,
     get_allowed_transitions,
-    list_events_for_entity,
-    ensure_core_tables_exist,
+    get_content,
+    list_content,
+    get_content_by_id,
+    update_content_state,
 )
-from app.tenant import resolve_tenant_id
-from app.schemas import ContentCreateIn, ContentOut, AllowedTransitionOut, EventOut
+
+app = FastAPI(title="Blog Platform API", version="0.5.0")
 
 
-APP_VERSION = "0.3.4"
-
-app = FastAPI(title="Blog Platform API", version=APP_VERSION)
-
-
-def require_tenant_slug(x_tenant_slug: Optional[str] = Header(default=None, alias="X-Tenant-Slug")) -> str:
-    if not x_tenant_slug:
-        raise HTTPException(status_code=400, detail="X-Tenant-Slug header is required")
-    return x_tenant_slug
-
-
-@app.on_event("startup")
-def _startup() -> None:
-    # Ensure minimal tables exist (safe idempotent)
-    engine = get_engine()
-    ensure_core_tables_exist(engine)
-
+# ---------- health/debug ----------
 
 @app.get("/healthz")
-def healthz() -> dict:
-    return {"ok": True, "version": APP_VERSION}
+def healthz():
+    return {"ok": True}
 
 
 @app.get("/readyz")
-def readyz() -> dict:
-    # If DB connection fails, raise 503
-    try:
-        engine = get_engine()
-        with engine.connect() as conn:
-            conn.exec_driver_sql("SELECT 1")
-        return {"ok": True, "db": "ok", "version": APP_VERSION}
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"DB not ready: {e}")
+def readyz():
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.exec_driver_sql("SELECT 1")
+    return {"ready": True}
 
 
 @app.get("/debug/fingerprint")
-def debug_fingerprint() -> dict:
+def debug_fingerprint():
+    here = os.path.abspath(__file__)
+    cwd = os.getcwd()
+    env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
     return {
-        "file": __file__,
-        "cwd": os.getcwd(),
+        "file": here,
+        "cwd": cwd,
         "time": datetime.now(timezone.utc).isoformat(),
-        "env_path": str((__import__("pathlib").Path(__file__).resolve().parents[1] / ".env")),
-        "version": APP_VERSION,
+        "env_path": env_path,
+        "version": app.version,
     }
 
 
 @app.get("/debug/dburl")
-def debug_dburl() -> dict:
-    # Never import app.settings. Just expose what db.py sees.
-    url = os.getenv("DATABASE_URL") or os.getenv("DB_URL")
-    return {"DATABASE_URL_set": bool(url), "DATABASE_URL": url}
+def debug_dburl():
+    # local dev only
+    from dotenv import load_dotenv
+    load_dotenv(override=False)
+    env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
+    if os.path.exists(env_path):
+        load_dotenv(env_path, override=False)
+
+    dburl = os.getenv("DATABASE_URL")
+    return {"DATABASE_URL_set": bool(dburl), "DATABASE_URL": dburl}
 
 
 @app.get("/debug/dbinfo")
-def debug_dbinfo() -> dict:
+def debug_dbinfo():
     engine = get_engine()
-    with engine.connect() as conn:
-        db = conn.exec_driver_sql("select current_database()").scalar()
-        usr = conn.exec_driver_sql("select current_user").scalar()
-        now = conn.exec_driver_sql("select now()").scalar()
-    return {"database": db, "user": usr, "now": str(now)}
+    with engine.begin() as conn:
+        ver = conn.exec_driver_sql("SELECT version()").scalar()
+        now = conn.exec_driver_sql("SELECT now()").scalar()
+    return {"version": ver, "now": str(now)}
 
+
+# ---------- workflow ----------
 
 @app.get("/workflow/states")
-def workflow_states() -> dict:
-    # Keep simple; your policy engine can expand later
-    return {"states": ["INGESTED", "CLASSIFIED", "DEFERRED", "RETIRED"]}
+def workflow_states():
+    return {"states": ["INGESTED", "CLASSIFIED", "DEFERRED", "RETIRED"], "policy": "v0"}
 
+
+# ---------- content endpoints ----------
 
 @app.post("/content", response_model=ContentOut)
-def create_content(
-    payload: ContentCreateIn,
-    x_tenant_slug: str = Depends(require_tenant_slug),
-) -> ContentOut:
-    engine: Engine = get_engine()
+def create_content_api(body: ContentCreateIn, x_tenant_slug: str = Depends(require_tenant)):
+    engine = get_engine()
     tenant_id = resolve_tenant_id(engine, x_tenant_slug)
 
-    now = datetime.now(timezone.utc)
+    item = create_content_item(engine, tenant_id, body.title, body.risk_tier)
 
-    item = create_content_item(
-        engine=engine,
+    # event
+    with engine.begin() as conn:
+        insert_event(
+            conn,
+            tenant_id=tenant_id,
+            entity_type="content",
+            entity_id=item["id"],
+            event_type="content.created",
+            payload={
+                "state": item["state"],
+                "title": item["title"],
+                "risk_tier": item["risk_tier"],
+                "tenant_slug": x_tenant_slug,
+            },
+        )
+
+    return item
+
+
+@app.get("/content/{content_id}", response_model=ContentOut)
+def get_content_api(content_id: UUID, x_tenant_slug: str = Depends(require_tenant)):
+    engine = get_engine()
+    tenant_id = resolve_tenant_id(engine, x_tenant_slug)
+
+    item = get_content(engine, tenant_id, content_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Content not found")
+    return item
+
+
+@app.get("/content", response_model=ContentListOut)
+def list_content_api(
+    x_tenant_slug: str = Depends(require_tenant),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    state: str | None = Query(None, description="Filter: INGESTED/CLASSIFIED/DEFERRED/RETIRED"),
+    risk_tier: int | None = Query(None, ge=1, le=3),
+    q: str | None = Query(None, description="Title search"),
+    sort: str = Query("created_at_desc", description="created_at_desc|created_at_asc|updated_at_desc|updated_at_asc"),
+):
+    engine = get_engine()
+    tenant_id = resolve_tenant_id(engine, x_tenant_slug)
+
+    items, total = list_content(
+        engine,
         tenant_id=tenant_id,
-        title=payload.title,
-        risk_tier=payload.risk_tier,
-        now=now,
-        tenant_slug=x_tenant_slug,
+        limit=limit,
+        offset=offset,
+        state=state,
+        risk_tier=risk_tier,
+        q=q,
+        sort=sort,
     )
-
-    # Ensure response is string timestamps to satisfy schema stability
-    return ContentOut(
-        id=item["id"],
-        title=item["title"],
-        state=item["state"],
-        risk_tier=item["risk_tier"],
-        created_at=item["created_at"],
-        updated_at=item["updated_at"],
-    )
+    return {"items": items, "limit": limit, "offset": offset, "total": total}
 
 
-@app.get("/content/{content_id}/allowed", response_model=List[AllowedTransitionOut])
-def allowed_transitions(
-    content_id: UUID,
-    x_tenant_slug: str = Depends(require_tenant_slug),
-) -> List[AllowedTransitionOut]:
-    engine: Engine = get_engine()
+@app.get("/content/{content_id}/events", response_model=list[EventOut])
+def content_events(content_id: UUID, x_tenant_slug: str = Depends(require_tenant)):
+    engine = get_engine()
     tenant_id = resolve_tenant_id(engine, x_tenant_slug)
-    rows = get_allowed_transitions(engine, tenant_id, content_id)
-    return [AllowedTransitionOut(**r) for r in rows]
+    return list_events(engine, tenant_id, "content", content_id)
 
 
-@app.get("/content/{content_id}/events", response_model=List[EventOut])
-def content_events(
-    content_id: UUID,
-    x_tenant_slug: str = Depends(require_tenant_slug),
-) -> List[EventOut]:
-    engine: Engine = get_engine()
+@app.get("/content/{content_id}/allowed", response_model=AllowedTransitionsOut)
+def allowed_transitions(content_id: UUID, x_tenant_slug: str = Depends(require_tenant)):
+    engine = get_engine()
     tenant_id = resolve_tenant_id(engine, x_tenant_slug)
-    rows = list_events_for_entity(engine, tenant_id, "content", content_id)
-    return [EventOut(**r) for r in rows]
+
+    row = get_allowed_transitions(engine, tenant_id, content_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Content not found")
+    return row
+
+
+@app.post("/content/{content_id}/transition", response_model=TransitionOut)
+def transition_content(content_id: UUID, body: TransitionIn, x_tenant_slug: str = Depends(require_tenant)):
+    engine = get_engine()
+    tenant_id = resolve_tenant_id(engine, x_tenant_slug)
+
+    with engine.begin() as conn:
+        item = get_content_by_id(conn, tenant_id, content_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="Content not found")
+        from_state = item["state"]
+        risk_tier = int(item["risk_tier"])
+
+    allowed_row = get_allowed_transitions(engine, tenant_id, content_id)
+    if not allowed_row:
+        raise HTTPException(status_code=404, detail="Content not found")
+
+    allowed = allowed_row["allowed"]
+    if body.to_state not in allowed:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": "Transition not allowed", "from_state": from_state, "to_state": body.to_state, "allowed": allowed},
+        )
+
+    with engine.begin() as conn:
+        update_content_state(conn, tenant_id, content_id, body.to_state)
+        insert_event(
+            conn,
+            tenant_id=tenant_id,
+            entity_type="content",
+            entity_id=str(content_id),
+            event_type="content.transitioned",
+            payload={"from_state": from_state, "to_state": body.to_state, "risk_tier": risk_tier, "tenant_slug": x_tenant_slug},
+        )
+
+    return {"content_id": str(content_id), "from_state": from_state, "to_state": body.to_state, "risk_tier": risk_tier}

@@ -1,65 +1,36 @@
-# backend/api/app/db.py
-from __future__ import annotations
-
 import os
-from pathlib import Path
-
-from dotenv import load_dotenv
+from functools import lru_cache
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 
+from dotenv import load_dotenv
 
-def _load_env_once() -> None:
+
+def _load_env() -> None:
     """
-    Loads .env from:
-      1) ENV_PATH if provided
-      2) backend/api/.env (project default)
-      3) current working directory .env (fallback)
+    Ensure .env is loaded even when uvicorn is started manually
+    from different working directories.
     """
-    # 1) explicit ENV_PATH
-    env_path = os.getenv("ENV_PATH")
-    if env_path:
-        p = Path(env_path)
-        if p.exists():
-            load_dotenv(p, override=False)
-            return
+    # Try current working dir first (where uvicorn was launched)
+    load_dotenv(override=False)
 
-    # 2) backend/api/.env (this file is backend/api/app/db.py)
-    backend_api_dir = Path(__file__).resolve().parents[1]  # .../backend/api
-    p2 = backend_api_dir / ".env"
-    if p2.exists():
-        load_dotenv(p2, override=False)
-        return
-
-    # 3) cwd .env
-    p3 = Path.cwd() / ".env"
-    if p3.exists():
-        load_dotenv(p3, override=False)
+    # Try repo-known location: backend/api/.env (relative to this file)
+    here = os.path.dirname(os.path.abspath(__file__))
+    api_root = os.path.abspath(os.path.join(here, ".."))  # backend/api
+    env_path = os.path.join(api_root, ".env")
+    if os.path.exists(env_path):
+        load_dotenv(env_path, override=False)
 
 
-_engine: Engine | None = None
-
-
+@lru_cache(maxsize=1)
 def get_engine() -> Engine:
-    global _engine
+    _load_env()
 
-    if _engine is not None:
-        return _engine
+    dburl = os.getenv("DATABASE_URL")
+    if not dburl:
+        raise RuntimeError("DATABASE_URL is not set")
 
-    _load_env_once()
+    echo = os.getenv("DB_ECHO", "false").lower() == "true"
 
-    db_url = os.getenv("DATABASE_URL") or os.getenv("DB_URL")
-    if not db_url:
-        backend_api_dir = Path(__file__).resolve().parents[1]
-        tried = [
-            f"ENV_PATH={os.getenv('ENV_PATH')}",
-            str(backend_api_dir / ".env"),
-            str(Path.cwd() / ".env"),
-        ]
-        raise RuntimeError(
-            "DATABASE_URL is not set. Ensure it exists in backend/api/.env or set ENV_PATH.\n"
-            f"Tried: {', '.join(tried)}"
-        )
-
-    _engine = create_engine(db_url, pool_pre_ping=True, future=True)
-    return _engine
+    # psycopg3 + SQLAlchemy URL is expected: postgresql+psycopg://...
+    return create_engine(dburl, echo=echo, future=True, pool_pre_ping=True)
