@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 load_dotenv(dotenv_path=ENV_PATH, override=False)
 
-from fastapi import FastAPI, HTTPException  # noqa: E402
+from fastapi import FastAPI, HTTPException, Header  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 from app.db import get_engine, db_ping  # noqa: E402
@@ -107,9 +107,12 @@ def workflow_states():
 
 
 @app.get("/content/{content_id}/allowed")
-def content_allowed(content_id: str):
+def content_allowed(
+    content_id: str,
+    x_tenant_slug: str | None = Header(default=None, alias="X-Tenant-Slug"),
+):
     engine = get_engine()
-    tenant_id = require_tenant(engine)
+    tenant_id = require_tenant(engine, x_tenant_slug)
 
     try:
         current = repo.get_content(engine, tenant_id, content_id)
@@ -131,9 +134,12 @@ def content_allowed(content_id: str):
 # Content endpoints
 # -----------------------------
 @app.post("/content", response_model=ContentOut)
-def create_content(body: ContentCreateIn):
+def create_content(
+    body: ContentCreateIn,
+    x_tenant_slug: str | None = Header(default=None, alias="X-Tenant-Slug"),
+):
     engine = get_engine()
-    tenant_id = require_tenant(engine)
+    tenant_id = require_tenant(engine, x_tenant_slug)
 
     try:
         item = repo.create_content(
@@ -156,38 +162,41 @@ def create_content(body: ContentCreateIn):
                 "title": body.title,
                 "risk_tier": body.risk_tier,
                 "state": item.get("state"),
-                "tenant_slug": "default",
+                "tenant_slug": (x_tenant_slug or "default"),
             },
         )
 
-        # Step 4: append provenance
-        repo.append_provenance_event(
-            engine,
-            tenant_id=tenant_id,
-            content_id=item["id"],
-            intake_id=None,
-            agent_name="api",
-            status="ok",
-            details={
-                "action": "create_content",
-                "title": body.title,
-                "risk_tier": body.risk_tier,
-                "state": item.get("state"),
-            },
-            model_name=None,
-        )
+        # Step 4: append provenance (if you added these repo functions)
+        if hasattr(repo, "append_provenance_event"):
+            repo.append_provenance_event(
+                engine,
+                tenant_id=tenant_id,
+                content_id=item["id"],
+                intake_id=None,
+                agent_name="api",
+                status="ok",
+                details={
+                    "action": "create_content",
+                    "title": body.title,
+                    "risk_tier": body.risk_tier,
+                    "state": item.get("state"),
+                },
+                model_name=None,
+            )
 
         return item
 
     except Exception as e:
-        # Do NOT hide errors anymore. This ends back-and-forth.
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/content/{content_id}", response_model=ContentOut)
-def get_content(content_id: str):
+def get_content(
+    content_id: str,
+    x_tenant_slug: str | None = Header(default=None, alias="X-Tenant-Slug"),
+):
     engine = get_engine()
-    tenant_id = require_tenant(engine)
+    tenant_id = require_tenant(engine, x_tenant_slug)
 
     try:
         return repo.get_content(engine, tenant_id, content_id)
@@ -196,9 +205,12 @@ def get_content(content_id: str):
 
 
 @app.get("/content/{content_id}/events", response_model=list[EventOut])
-def get_content_events(content_id: str):
+def get_content_events(
+    content_id: str,
+    x_tenant_slug: str | None = Header(default=None, alias="X-Tenant-Slug"),
+):
     engine = get_engine()
-    tenant_id = require_tenant(engine)
+    tenant_id = require_tenant(engine, x_tenant_slug)
 
     try:
         _ = repo.get_content(engine, tenant_id, content_id)
@@ -208,9 +220,13 @@ def get_content_events(content_id: str):
 
 
 @app.post("/content/{content_id}/transition", response_model=ContentOut)
-def transition(content_id: str, body: TransitionIn):
+def transition(
+    content_id: str,
+    body: TransitionIn,
+    x_tenant_slug: str | None = Header(default=None, alias="X-Tenant-Slug"),
+):
     engine = get_engine()
-    tenant_id = require_tenant(engine)
+    tenant_id = require_tenant(engine, x_tenant_slug)
 
     try:
         current = repo.get_content(engine, tenant_id, content_id)
@@ -221,7 +237,6 @@ def transition(content_id: str, body: TransitionIn):
 
         updated = repo.transition_content(engine, tenant_id, content_id, body.to_state)
 
-        # Step 3: append event
         repo.append_event(
             engine,
             tenant_id=tenant_id,
@@ -235,27 +250,27 @@ def transition(content_id: str, body: TransitionIn):
                 "to_state": body.to_state,
                 "reason": body.reason,
                 "risk_tier": risk_tier,
-                "tenant_slug": "default",
+                "tenant_slug": (x_tenant_slug or "default"),
             },
         )
 
-        # Step 4: append provenance
-        repo.append_provenance_event(
-            engine,
-            tenant_id=tenant_id,
-            content_id=content_id,
-            intake_id=None,
-            agent_name="api",
-            status="ok",
-            details={
-                "action": "transition",
-                "from_state": from_state,
-                "to_state": body.to_state,
-                "reason": body.reason,
-                "risk_tier": risk_tier,
-            },
-            model_name=None,
-        )
+        if hasattr(repo, "append_provenance_event"):
+            repo.append_provenance_event(
+                engine,
+                tenant_id=tenant_id,
+                content_id=content_id,
+                intake_id=None,
+                agent_name="api",
+                status="ok",
+                details={
+                    "action": "transition",
+                    "from_state": from_state,
+                    "to_state": body.to_state,
+                    "reason": body.reason,
+                    "risk_tier": risk_tier,
+                },
+                model_name=None,
+            )
 
         return updated
 
@@ -271,14 +286,19 @@ def transition(content_id: str, body: TransitionIn):
 # Step 4: Provenance read API
 # -----------------------------
 @app.get("/content/{content_id}/provenance", response_model=list[ProvenanceOut])
-def get_content_provenance(content_id: str):
+def get_content_provenance(
+    content_id: str,
+    x_tenant_slug: str | None = Header(default=None, alias="X-Tenant-Slug"),
+):
     engine = get_engine()
-    tenant_id = require_tenant(engine)
+    tenant_id = require_tenant(engine, x_tenant_slug)
 
-    # ensure content exists
     try:
         _ = repo.get_content(engine, tenant_id, content_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Not found")
+
+    if not hasattr(repo, "list_provenance_events"):
+        return []
 
     return repo.list_provenance_events(engine, tenant_id, content_id)
