@@ -260,3 +260,147 @@ def list_events(engine, tenant_id: str, entity_type: str, entity_id: str) -> lis
             }
         )
     return out
+
+# ----------------------------
+# provenance (Step 4)
+# ----------------------------
+def append_provenance_event(
+    engine,
+    tenant_id: str,
+    *,
+    content_id: str | None,
+    intake_id: str | None,
+    agent_name: str,
+    status: str,
+    details: dict,
+    prompt_version_id: str | None = None,
+    policy_version_id: str | None = None,
+    model_name: str | None = None,
+    input_hash: str | None = None,
+    output_hash: str | None = None,
+) -> dict:
+    created_at = _utcnow()
+    details_json = _jsonb(details)
+
+    with engine.begin() as conn:
+        row = conn.execute(
+            text(
+                """
+                INSERT INTO public.provenance_events
+                    (tenant_id, content_id, intake_id, agent_name,
+                     prompt_version_id, policy_version_id, model_name,
+                     input_hash, output_hash, status, details, created_at)
+                VALUES
+                    (CAST(:tenant_id AS uuid),
+                     CASE WHEN :content_id IS NULL THEN NULL ELSE CAST(:content_id AS uuid) END,
+                     CASE WHEN :intake_id IS NULL THEN NULL ELSE CAST(:intake_id AS uuid) END,
+                     :agent_name,
+                     CASE WHEN :prompt_version_id IS NULL THEN NULL ELSE CAST(:prompt_version_id AS uuid) END,
+                     CASE WHEN :policy_version_id IS NULL THEN NULL ELSE CAST(:policy_version_id AS uuid) END,
+                     :model_name,
+                     :input_hash,
+                     :output_hash,
+                     :status,
+                     CAST(:details AS jsonb),
+                     :created_at
+                    )
+                RETURNING
+                    id::text AS id,
+                    tenant_id::text AS tenant_id,
+                    content_id::text AS content_id,
+                    intake_id::text AS intake_id,
+                    agent_name,
+                    prompt_version_id::text AS prompt_version_id,
+                    policy_version_id::text AS policy_version_id,
+                    model_name,
+                    input_hash,
+                    output_hash,
+                    status,
+                    details,
+                    created_at
+                """
+            ),
+            {
+                "tenant_id": tenant_id,
+                "content_id": content_id,
+                "intake_id": intake_id,
+                "agent_name": agent_name,
+                "prompt_version_id": prompt_version_id,
+                "policy_version_id": policy_version_id,
+                "model_name": model_name,
+                "input_hash": input_hash,
+                "output_hash": output_hash,
+                "status": status,
+                "details": details_json,
+                "created_at": created_at,
+            },
+        ).mappings().first()
+
+    if not row:
+        raise RuntimeError("Failed to append provenance event")
+
+    return {
+        "id": row["id"],
+        "tenant_id": row["tenant_id"],
+        "content_id": row["content_id"],
+        "intake_id": row["intake_id"],
+        "agent_name": row["agent_name"],
+        "prompt_version_id": row["prompt_version_id"],
+        "policy_version_id": row["policy_version_id"],
+        "model_name": row["model_name"],
+        "input_hash": row["input_hash"],
+        "output_hash": row["output_hash"],
+        "status": row["status"],
+        "details": row["details"],
+        "created_at": row["created_at"].astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+
+def list_provenance_events(engine, tenant_id: str, content_id: str) -> list[dict]:
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT
+                    id::text AS id,
+                    tenant_id::text AS tenant_id,
+                    content_id::text AS content_id,
+                    intake_id::text AS intake_id,
+                    agent_name,
+                    prompt_version_id::text AS prompt_version_id,
+                    policy_version_id::text AS policy_version_id,
+                    model_name,
+                    input_hash,
+                    output_hash,
+                    status,
+                    details,
+                    created_at
+                FROM public.provenance_events
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND content_id = CAST(:content_id AS uuid)
+                ORDER BY created_at ASC
+                """
+            ),
+            {"tenant_id": tenant_id, "content_id": content_id},
+        ).mappings().all()
+
+    out = []
+    for r in rows:
+        out.append(
+            {
+                "id": r["id"],
+                "tenant_id": r["tenant_id"],
+                "content_id": r["content_id"],
+                "intake_id": r["intake_id"],
+                "agent_name": r["agent_name"],
+                "prompt_version_id": r["prompt_version_id"],
+                "policy_version_id": r["policy_version_id"],
+                "model_name": r["model_name"],
+                "input_hash": r["input_hash"],
+                "output_hash": r["output_hash"],
+                "status": r["status"],
+                "details": r["details"],
+                "created_at": r["created_at"].astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            }
+        )
+    return out
