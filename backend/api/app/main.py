@@ -17,9 +17,9 @@ from app.db import get_engine, db_ping  # noqa: E402
 from app.schemas import ContentCreateIn, ContentOut, TransitionIn, EventOut  # noqa: E402
 from app import repo  # noqa: E402
 from app.workflow import validate_transition, WorkflowError, allowed_transitions, list_states  # noqa: E402
-from app.tenant import resolve_tenant_id  # noqa: E402
+from app.tenant import normalize_tenant_slug, get_tenant_id  # noqa: E402
 
-app = FastAPI(title="Blog Platform API", version="0.3.1")
+app = FastAPI(title="Blog Platform API", version="0.3.2")
 
 
 # -----------------------------
@@ -89,7 +89,7 @@ def readyz():
 
 
 # -----------------------------
-# Workflow helpers (Step 3)
+# Workflow helpers
 # -----------------------------
 @app.get("/workflow/states")
 def workflow_states():
@@ -99,14 +99,16 @@ def workflow_states():
 @app.get("/content/{content_id}/allowed")
 def content_allowed(
     content_id: str,
-    x_tenant_slug: str | None = Header(default=None, alias="X-Tenant-Slug"),
+    x_tenant_slug: str | None = Header(None, alias="X-Tenant-Slug"),
 ):
     engine = get_engine()
+    slug = normalize_tenant_slug(x_tenant_slug)
+    tenant_id = get_tenant_id(engine, slug)
+
     try:
-        tenant_id = resolve_tenant_id(engine, x_tenant_slug)
         current = repo.get_content(engine, tenant_id, content_id)
     except KeyError:
-        raise HTTPException(status_code=404, detail="Not Found")
+        raise HTTPException(status_code=404, detail="Not found")
 
     from_state = current["state"]
     risk_tier = int(current["risk_tier"])
@@ -125,77 +127,81 @@ def content_allowed(
 @app.post("/content", response_model=ContentOut)
 def create_content(
     body: ContentCreateIn,
-    x_tenant_slug: str | None = Header(default=None, alias="X-Tenant-Slug"),
+    x_tenant_slug: str | None = Header(None, alias="X-Tenant-Slug"),
 ):
     engine = get_engine()
-    try:
-        tenant_id = resolve_tenant_id(engine, x_tenant_slug)
+    slug = normalize_tenant_slug(x_tenant_slug)
+    tenant_id = get_tenant_id(engine, slug)
 
-        item = repo.create_content(
-            engine,
-            tenant_id=tenant_id,
-            title=body.title,
-            risk_tier=body.risk_tier,
-        )
+    item = repo.create_content(
+        engine,
+        tenant_id=tenant_id,
+        title=body.title,
+        risk_tier=body.risk_tier,
+    )
 
-        repo.append_event(
-            engine,
-            tenant_id=tenant_id,
-            entity_type="content",
-            entity_id=item["id"],
-            event_type="content.created",
-            actor_type="system",
-            actor_id=None,
-            payload={
-                "title": body.title,
-                "risk_tier": body.risk_tier,
-                "state": item.get("state"),
-                "tenant_slug": (x_tenant_slug or "default"),
-            },
-        )
-        return item
+    repo.append_event(
+        engine,
+        tenant_id=tenant_id,
+        entity_type="content",
+        entity_id=item["id"],
+        event_type="content.created",
+        actor_type="system",
+        actor_id=None,
+        payload={
+            "title": body.title,
+            "risk_tier": body.risk_tier,
+            "state": item["state"],
+            "tenant_slug": slug,
+        },
+    )
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return item
 
 
 @app.get("/content/{content_id}", response_model=ContentOut)
 def get_content(
     content_id: str,
-    x_tenant_slug: str | None = Header(default=None, alias="X-Tenant-Slug"),
+    x_tenant_slug: str | None = Header(None, alias="X-Tenant-Slug"),
 ):
     engine = get_engine()
+    slug = normalize_tenant_slug(x_tenant_slug)
+    tenant_id = get_tenant_id(engine, slug)
+
     try:
-        tenant_id = resolve_tenant_id(engine, x_tenant_slug)
         return repo.get_content(engine, tenant_id, content_id)
     except KeyError:
-        raise HTTPException(status_code=404, detail="Not Found")
+        raise HTTPException(status_code=404, detail="Not found")
 
 
 @app.get("/content/{content_id}/events", response_model=list[EventOut])
 def get_content_events(
     content_id: str,
-    x_tenant_slug: str | None = Header(default=None, alias="X-Tenant-Slug"),
+    x_tenant_slug: str | None = Header(None, alias="X-Tenant-Slug"),
 ):
     engine = get_engine()
+    slug = normalize_tenant_slug(x_tenant_slug)
+    tenant_id = get_tenant_id(engine, slug)
+
     try:
-        tenant_id = resolve_tenant_id(engine, x_tenant_slug)
         _ = repo.get_content(engine, tenant_id, content_id)
-        return repo.list_events(engine, tenant_id, "content", content_id)
     except KeyError:
-        raise HTTPException(status_code=404, detail="Not Found")
+        raise HTTPException(status_code=404, detail="Not found")
+
+    return repo.list_events(engine, tenant_id, "content", content_id)
 
 
 @app.post("/content/{content_id}/transition", response_model=ContentOut)
 def transition(
     content_id: str,
     body: TransitionIn,
-    x_tenant_slug: str | None = Header(default=None, alias="X-Tenant-Slug"),
+    x_tenant_slug: str | None = Header(None, alias="X-Tenant-Slug"),
 ):
     engine = get_engine()
-    try:
-        tenant_id = resolve_tenant_id(engine, x_tenant_slug)
+    slug = normalize_tenant_slug(x_tenant_slug)
+    tenant_id = get_tenant_id(engine, slug)
 
+    try:
         current = repo.get_content(engine, tenant_id, content_id)
         from_state = current["state"]
         risk_tier = int(current["risk_tier"])
@@ -217,14 +223,13 @@ def transition(
                 "to_state": body.to_state,
                 "reason": body.reason,
                 "risk_tier": risk_tier,
-                "tenant_slug": (x_tenant_slug or "default"),
+                "tenant_slug": slug,
             },
         )
+
         return updated
 
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Not found")
     except WorkflowError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Not Found")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
