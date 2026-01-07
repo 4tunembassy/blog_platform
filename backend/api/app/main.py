@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import FastAPI, Depends, HTTPException, Query
+from dotenv import load_dotenv
 
 from app.db import get_engine
 from app.tenant import require_tenant, resolve_tenant_id
@@ -26,7 +27,14 @@ from app.repo import (
     update_content_state,
 )
 
-app = FastAPI(title="Blog Platform API", version="0.5.0")
+# ---- ensure .env is loaded in ALL run modes ----
+# Loads: backend/api/.env (relative to this file)
+ENV_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
+load_dotenv(override=False)
+if os.path.exists(ENV_PATH):
+    load_dotenv(ENV_PATH, override=False)
+
+app = FastAPI(title="Blog Platform API", version="0.5.1")
 
 
 # ---------- health/debug ----------
@@ -48,25 +56,17 @@ def readyz():
 def debug_fingerprint():
     here = os.path.abspath(__file__)
     cwd = os.getcwd()
-    env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
     return {
         "file": here,
         "cwd": cwd,
         "time": datetime.now(timezone.utc).isoformat(),
-        "env_path": env_path,
+        "env_path": ENV_PATH,
         "version": app.version,
     }
 
 
 @app.get("/debug/dburl")
 def debug_dburl():
-    # local dev only
-    from dotenv import load_dotenv
-    load_dotenv(override=False)
-    env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
-    if os.path.exists(env_path):
-        load_dotenv(env_path, override=False)
-
     dburl = os.getenv("DATABASE_URL")
     return {"DATABASE_URL_set": bool(dburl), "DATABASE_URL": dburl}
 
@@ -126,14 +126,15 @@ def get_content_api(content_id: UUID, x_tenant_slug: str = Depends(require_tenan
     return item
 
 
+# ✅ THIS IS THE ROUTE YOU’RE MISSING (GET /content)
 @app.get("/content", response_model=ContentListOut)
 def list_content_api(
     x_tenant_slug: str = Depends(require_tenant),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    state: str | None = Query(None, description="Filter: INGESTED/CLASSIFIED/DEFERRED/RETIRED"),
-    risk_tier: int | None = Query(None, ge=1, le=3),
-    q: str | None = Query(None, description="Title search"),
+    state: str = Query(None, description="INGESTED/CLASSIFIED/DEFERRED/RETIRED"),
+    risk_tier: int = Query(None, ge=1, le=3),
+    q: str = Query(None, description="Title search"),
     sort: str = Query("created_at_desc", description="created_at_desc|created_at_asc|updated_at_desc|updated_at_asc"),
 ):
     engine = get_engine()
